@@ -5,92 +5,172 @@ on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/rest-api-demo.yaml"
   workflow_dispatch:
 
 jobs:
-  check-workflow:
+  rest-api:
+    name: Accounts REST API Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: accounts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URI: postgresql://postgres:postgres@localhost:5432/accounts
+      SQLALCHEMY_DATABASE_URI: postgresql://postgres:postgres@localhost:5432/accounts
+
     steps:
-      - name: Verify workflow registration
-        run: echo "Workflow registered successfully"
+      - name: Checkout source code
+        uses: actions/checkout@v4
 
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
-      - name: Collect REST API evidence
-        continue-on-error: true
+      - name: Run Accounts API CRUD requests
         shell: bash
         run: |
           set -euo pipefail
 
+          BASE="http://127.0.0.1:8080"
+
+          echo "Starting Accounts API..."
+
           gunicorn --bind 127.0.0.1:8080 service:app \
             > /tmp/accounts-server.log 2>&1 &
 
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/health; then
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS "$BASE/health" > /dev/null 2>&1; then
+              READY=1
               break
             fi
+
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              break
+            fi
+
             sleep 1
           done
 
-          BASE="http://127.0.0.1:8080"
+          if [ "$READY" -ne 1 ]; then
+            echo "ERROR: Accounts API failed to start."
+            cat /tmp/accounts-server.log
+            exit 1
+          fi
+
+          echo "Accounts API started successfully."
 
           record_request() {
-            FILE="$1"
-            METHOD="$2"
-            URL="$3"
-            EXPECTED="$4"
-            BODY="${5:-}"
+            local file="$1"
+            local expected="$2"
+            local display_command="$3"
 
-            ARGS=(-sS -X "$METHOD" -D /tmp/headers
-                  -o /tmp/body -w "%{http_code}")
+            shift 3
 
-            printf 'curl -i -X %s %s' "$METHOD" "$URL" > "$FILE"
+            printf '%s\n\n' "$display_command" > "$file"
 
-            if [ -n "$BODY" ]; then
-              printf " -H 'Content-Type: application/json' -d '%s'" \
-                "$BODY" >> "$FILE"
-              ARGS+=(-H "Content-Type: application/json" -d "$BODY")
-            fi
+            local actual
 
-            printf '\n' >> "$FILE"
+            actual=$(curl -sS --max-time 20 \
+              -D /tmp/response.headers \
+              -o /tmp/response.body \
+              -w '%{http_code}' "$@")
 
-            CODE=$(curl "${ARGS[@]}" "$URL")
+            cat /tmp/response.headers >> "$file"
+            cat /tmp/response.body >> "$file"
+            printf '\n' >> "$file"
 
-            cat /tmp/headers >> "$FILE"
-            cat /tmp/body >> "$FILE"
-            printf '\n' >> "$FILE"
+            cat "$file"
+            echo "Expected: $expected"
+            echo "Actual: $actual"
 
-            cat "$FILE"
-
-            echo "HTTP status: $CODE"
-
-            if [ "$CODE" != "$EXPECTED" ]; then
-              echo "Expected HTTP $EXPECTED but received $CODE"
-              exit 1
+            if [ "$actual" != "$expected" ]; then
+              echo "ERROR: Unexpected HTTP response."
+              cat /tmp/accounts-server.log
+              return 1
             fi
           }
 
-          CREATE='{"name":"Demo Account","email":"demo@example.com","address":"123 Sample Street","phone_number":"5550100","date_joined":"2026-10-22"}'
+          CREATE_JSON='{"name":"Demo Account","email":"demo@example.com","address":"123 Sample Street","phone_number":"5550100","date_joined":"2026-10-22"}'
 
-          record_request rest-create-done POST \
-            "$BASE/accounts" 201 "$CREATE"
+          echo "TASK 13 - CREATE"
 
-          ID=$(python -c \
-            'import json; print(json.load(open("/tmp/body"))["id"])')
+          record_request \
+            rest-create-done \
+            201 \
+            "curl -i -X POST $BASE/accounts -H 'Content-Type: application/json' -d '$CREATE_JSON'" \
+            -X POST "$BASE/accounts" \
+            -H "Content-Type: application/json" \
+            -d "$CREATE_JSON"
 
-          record_request rest-list-done GET \
-            "$BASE/accounts" 200
+          ACCOUNT_ID=$(python -c \
+            'import json; print(json.load(open("/tmp/response.body"))["id"])')
 
-          record_request rest-read-done GET \
-            "$BASE/accounts/$ID" 200
+          echo "Created account ID: $ACCOUNT_ID"
 
-          UPDATE='{"name":"Updated Account","email":"updated@example.com","address":"456 New Street","phone_number":"5550200","date_joined":"2026-10-22"}'
+          echo "TASK 14 - LIST"
 
-          record_request rest-update-done PUT \
-            "$BASE/accounts/$ID" 200 "$UPDATE"
+          record_request \
+            rest-list-done \
+            200 \
+            "curl -i -X GET $BASE/accounts" \
+            -X GET "$BASE/accounts"
 
-          record_request rest-delete-done DELETE \
-            "$BASE/accounts/$ID" 204
+          echo "TASK 15 - READ"
+
+          record_request \
+            rest-read-done \
+            200 \
+            "curl -i -X GET $BASE/accounts/$ACCOUNT_ID" \
+            -X GET "$BASE/accounts/$ACCOUNT_ID"
+
+          UPDATE_JSON='{"name":"Updated Account","email":"updated@example.com","address":"456 New Street","phone_number":"5550200","date_joined":"2026-10-22"}'
+
+          echo "TASK 16 - UPDATE"
+
+          record_request \
+            rest-update-done \
+            200 \
+            "curl -i -X PUT $BASE/accounts/$ACCOUNT_ID -H 'Content-Type: application/json' -d '$UPDATE_JSON'" \
+            -X PUT "$BASE/accounts/$ACCOUNT_ID" \
+            -H "Content-Type: application/json" \
+            -d "$UPDATE_JSON"
+
+          echo "TASK 17 - DELETE"
+
+          record_request \
+            rest-delete-done \
+            204 \
+            "curl -i -X DELETE $BASE/accounts/$ACCOUNT_ID" \
+            -X DELETE "$BASE/accounts/$ACCOUNT_ID"
+
+          echo "All five REST API requests passed."
 
       - name: Upload REST API evidence
         if: always()
@@ -104,3 +184,8 @@ jobs:
             rest-update-done
             rest-delete-done
           if-no-files-found: warn
+
+      - name: Show server logs if failed
+        if: failure()
+        run: |
+          cat /tmp/accounts-server.log || true
