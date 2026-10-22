@@ -1,0 +1,111 @@
+
+name: Accounts REST API Evidence
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rest-api:
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: accounts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URI: postgresql://postgres:postgres@localhost:5432/accounts
+      SQLALCHEMY_DATABASE_URI: postgresql://postgres:postgres@localhost:5432/accounts
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Start Accounts API
+        run: |
+          gunicorn --bind 127.0.0.1:8080 service:app > /tmp/accounts-server.log 2>&1 &
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health; then
+              echo "Accounts API is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat /tmp/accounts-server.log
+          exit 1
+
+      - name: Execute REST API requests
+        run: |
+          set -euo pipefail
+
+          BASE_URL="http://127.0.0.1:8080"
+
+          CREATE_JSON='{"name":"Demo Account","email":"demo@example.com","address":"123 Sample Street","phone_number":"5550100","date_joined":"2026-10-22"}'
+
+          echo "TASK 13 - CREATE"
+          echo "curl -i -X POST $BASE_URL/accounts -H 'Content-Type: application/json' -d '$CREATE_JSON'" | tee rest-create-done
+          curl -sS --fail-with-body -i -X POST "$BASE_URL/accounts" \
+            -H "Content-Type: application/json" \
+            -d "$CREATE_JSON" | tee -a rest-create-done
+
+          ACCOUNT_ID=$(python -c 'import json; from pathlib import Path; text=Path("rest-create-done").read_text(); print(json.loads(text.split("\n\n",1)[1])["id"])')
+          echo "Created Account ID: $ACCOUNT_ID"
+
+          echo "TASK 14 - LIST"
+          echo "curl -i -X GET $BASE_URL/accounts" | tee rest-list-done
+          curl -sS --fail-with-body -i -X GET "$BASE_URL/accounts" | tee -a rest-list-done
+
+          echo "TASK 15 - READ"
+          echo "curl -i -X GET $BASE_URL/accounts/$ACCOUNT_ID" | tee rest-read-done
+          curl -sS --fail-with-body -i -X GET "$BASE_URL/accounts/$ACCOUNT_ID" | tee -a rest-read-done
+
+          UPDATE_JSON='{"name":"Updated Account","email":"updated@example.com","address":"456 New Street","phone_number":"5550200","date_joined":"2026-10-22"}'
+
+          echo "TASK 16 - UPDATE"
+          echo "curl -i -X PUT $BASE_URL/accounts/$ACCOUNT_ID -H 'Content-Type: application/json' -d '$UPDATE_JSON'" | tee rest-update-done
+          curl -sS --fail-with-body -i -X PUT "$BASE_URL/accounts/$ACCOUNT_ID" \
+            -H "Content-Type: application/json" \
+            -d "$UPDATE_JSON" | tee -a rest-update-done
+
+          echo "TASK 17 - DELETE"
+          echo "curl -i -X DELETE $BASE_URL/accounts/$ACCOUNT_ID" | tee rest-delete-done
+          curl -sS --fail-with-body -i -X DELETE "$BASE_URL/accounts/$ACCOUNT_ID" | tee -a rest-delete-done
+
+      - name: Upload REST API evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rest-api-evidence
+          path: |
+            rest-create-done
+            rest-list-done
+            rest-read-done
+            rest-update-done
+            rest-delete-done
+          if-no-files-found: warn
+
+      - name: Show server logs if failed
+        if: failure()
+        run: |
+          cat /tmp/accounts-server.log || true
