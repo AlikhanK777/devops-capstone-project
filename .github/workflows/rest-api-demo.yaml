@@ -2,11 +2,18 @@
 name: Accounts REST API Evidence
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rest-api-demo.yaml"
   workflow_dispatch:
 
 jobs:
   rest-api:
+    name: Test Accounts REST API
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -38,59 +45,150 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
       - name: Start Accounts API
         run: |
-          gunicorn --bind 127.0.0.1:8080 service:app > /tmp/accounts-server.log 2>&1 &
+          nohup gunicorn \
+            --bind 127.0.0.1:8080 \
+            service:app \
+            > /tmp/accounts-server.log 2>&1 </dev/null &
+
+          echo "Checking Accounts API..."
 
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/health; then
-              echo "Accounts API is ready"
+              echo ""
+              echo "Accounts API is ready!"
               exit 0
             fi
+
             sleep 1
           done
 
+          echo "ERROR: Accounts API did not start."
           cat /tmp/accounts-server.log
           exit 1
 
       - name: Execute REST API requests
+        shell: bash
         run: |
           set -euo pipefail
 
           BASE_URL="http://127.0.0.1:8080"
 
+          # Execute a real HTTP request and save
+          # both its command and server response.
+          request_and_save() {
+            local file="$1"
+            local method="$2"
+            local endpoint="$3"
+            local expected="$4"
+            local payload="${5:-}"
+
+            local url="${BASE_URL}${endpoint}"
+
+            local args=(
+              -sS
+              -X "$method"
+              "$url"
+              -D /tmp/response-headers
+              -o /tmp/response-body
+              -w "%{http_code}"
+            )
+
+            echo "--------------------------------"
+
+            printf 'curl -i -X %s %s' \
+              "$method" "$url" | tee "$file"
+
+            if [[ -n "$payload" ]]; then
+              printf " -H 'Content-Type: application/json' -d '%s'" \
+                "$payload" | tee -a "$file"
+
+              args+=(
+                -H "Content-Type: application/json"
+                -d "$payload"
+              )
+            fi
+
+            printf '\n' | tee -a "$file"
+
+            local http_code
+            http_code=$(curl "${args[@]}")
+
+            cat /tmp/response-headers | tee -a "$file"
+            cat /tmp/response-body | tee -a "$file"
+            printf '\n' | tee -a "$file"
+
+            echo "Expected: $expected"
+            echo "Received: $http_code"
+
+            if [[ "$http_code" != "$expected" ]]; then
+              echo "ERROR: Unexpected HTTP status."
+              return 1
+            fi
+          }
+
+          # TASK 13 - CREATE
           CREATE_JSON='{"name":"Demo Account","email":"demo@example.com","address":"123 Sample Street","phone_number":"5550100","date_joined":"2026-10-22"}'
 
-          echo "TASK 13 - CREATE"
-          echo "curl -i -X POST $BASE_URL/accounts -H 'Content-Type: application/json' -d '$CREATE_JSON'" | tee rest-create-done
-          curl -sS --fail-with-body -i -X POST "$BASE_URL/accounts" \
-            -H "Content-Type: application/json" \
-            -d "$CREATE_JSON" | tee -a rest-create-done
+          echo "TASK 13 - CREATE ACCOUNT"
 
-          ACCOUNT_ID=$(python -c 'import json; from pathlib import Path; text=Path("rest-create-done").read_text(); print(json.loads(text.split("\n\n",1)[1])["id"])')
+          request_and_save \
+            rest-create-done \
+            POST \
+            /accounts \
+            201 \
+            "$CREATE_JSON"
+
+          # Read ID from the actual JSON response.
+          ACCOUNT_ID=$(python -c \
+            'import json; print(json.load(open("/tmp/response-body"))["id"])')
+
           echo "Created Account ID: $ACCOUNT_ID"
 
-          echo "TASK 14 - LIST"
-          echo "curl -i -X GET $BASE_URL/accounts" | tee rest-list-done
-          curl -sS --fail-with-body -i -X GET "$BASE_URL/accounts" | tee -a rest-list-done
+          # TASK 14 - LIST
+          echo "TASK 14 - LIST ACCOUNTS"
 
-          echo "TASK 15 - READ"
-          echo "curl -i -X GET $BASE_URL/accounts/$ACCOUNT_ID" | tee rest-read-done
-          curl -sS --fail-with-body -i -X GET "$BASE_URL/accounts/$ACCOUNT_ID" | tee -a rest-read-done
+          request_and_save \
+            rest-list-done \
+            GET \
+            /accounts \
+            200
 
+          # TASK 15 - READ
+          echo "TASK 15 - READ ACCOUNT"
+
+          request_and_save \
+            rest-read-done \
+            GET \
+            "/accounts/$ACCOUNT_ID" \
+            200
+
+          # TASK 16 - UPDATE
           UPDATE_JSON='{"name":"Updated Account","email":"updated@example.com","address":"456 New Street","phone_number":"5550200","date_joined":"2026-10-22"}'
 
-          echo "TASK 16 - UPDATE"
-          echo "curl -i -X PUT $BASE_URL/accounts/$ACCOUNT_ID -H 'Content-Type: application/json' -d '$UPDATE_JSON'" | tee rest-update-done
-          curl -sS --fail-with-body -i -X PUT "$BASE_URL/accounts/$ACCOUNT_ID" \
-            -H "Content-Type: application/json" \
-            -d "$UPDATE_JSON" | tee -a rest-update-done
+          echo "TASK 16 - UPDATE ACCOUNT"
 
-          echo "TASK 17 - DELETE"
-          echo "curl -i -X DELETE $BASE_URL/accounts/$ACCOUNT_ID" | tee rest-delete-done
-          curl -sS --fail-with-body -i -X DELETE "$BASE_URL/accounts/$ACCOUNT_ID" | tee -a rest-delete-done
+          request_and_save \
+            rest-update-done \
+            PUT \
+            "/accounts/$ACCOUNT_ID" \
+            200 \
+            "$UPDATE_JSON"
+
+          # TASK 17 - DELETE
+          echo "TASK 17 - DELETE ACCOUNT"
+
+          request_and_save \
+            rest-delete-done \
+            DELETE \
+            "/accounts/$ACCOUNT_ID" \
+            204
+
+          echo "All five REST API requests completed!"
 
       - name: Upload REST API evidence
         if: always()
@@ -108,4 +206,5 @@ jobs:
       - name: Show server logs if failed
         if: failure()
         run: |
+          echo "Accounts API server logs:"
           cat /tmp/accounts-server.log || true
