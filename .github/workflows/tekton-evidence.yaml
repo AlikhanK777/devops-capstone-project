@@ -1,3 +1,4 @@
+
 name: Accounts Tekton Pipeline Evidence
 
 on:
@@ -133,15 +134,20 @@ jobs:
                 image: python:3.9-slim
                 script: |
                   #!/usr/bin/env python3
-                  from urllib.request import urlopen
+                  from urllib.request import Request, urlopen
 
-                  url = "http://accounts.default.svc.cluster.local:8080/"
-                  with urlopen(url, timeout=20) as response:
+                  origin = "http://localhost:3000"
+                  url = "http://accounts.default.svc.cluster.local:8080/accounts"
+                  request = Request(url, headers={"Origin": origin})
+                  with urlopen(request, timeout=20) as response:
                       cors = response.headers.get("Access-Control-Allow-Origin")
                       frame = response.headers.get("X-Frame-Options")
+                      print("GET /accounts HTTP", response.status, flush=True)
+                      print("Request Origin:", origin, flush=True)
                       print("CORS:", cors, flush=True)
                       print("X-Frame-Options:", frame, flush=True)
-                      assert cors == "*", cors
+                      assert response.status == 200
+                      assert cors in ("*", origin), "Missing or unexpected CORS header: " + str(cors)
                       assert frame, "Missing X-Frame-Options header"
                   print("PASS: CORS and security headers", flush=True)
           ---
@@ -180,9 +186,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl wait pipelinerun/accounts-validation-run \
-            --for=condition=Succeeded --timeout=600s
-          kubectl get pipelineruns,taskruns
+          for attempt in $(seq 1 60); do
+            STATUS=$(kubectl get pipelinerun accounts-validation-run \
+              -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
+            echo "Check $attempt: PipelineRun Succeeded=$STATUS"
+
+            if [ "$STATUS" = "True" ]; then
+              echo "Tekton PipelineRun succeeded."
+              kubectl get pipelineruns,taskruns
+              exit 0
+            fi
+
+            if [ "$STATUS" = "False" ]; then
+              echo "ERROR: Tekton PipelineRun failed."
+              kubectl get pipelineruns,taskruns
+              kubectl describe pipelinerun accounts-validation-run || true
+              exit 1
+            fi
+
+            sleep 5
+          done
+          echo "ERROR: Tekton PipelineRun did not finish within 5 minutes."
+          kubectl get pipelineruns,taskruns || true
+          exit 1
 
       - name: Collect complete Tekton logs
         if: always()
