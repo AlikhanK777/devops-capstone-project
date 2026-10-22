@@ -182,7 +182,26 @@ jobs:
           echo "Application JSON captured successfully."
           echo "All five REST API requests passed."
 
-      - name: Upload REST API evidence
+      - name: Build Docker image and save details
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "TASK 30 - DOCKER IMAGE DETAILS"
+
+          echo "Building accounts:latest Docker image..."
+
+          docker build -t accounts:latest .
+
+          echo "Docker image built successfully."
+
+          docker image ls accounts:latest \
+            --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}' \
+            | tee kube-images
+
+          echo "Docker image information saved to kube-images."
+
+      - name: Upload REST API and Docker evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -194,6 +213,7 @@ jobs:
             rest-update-done
             rest-delete-done
             kube-app-output
+            kube-images
           if-no-files-found: warn
 
       - name: Show server logs if failed
