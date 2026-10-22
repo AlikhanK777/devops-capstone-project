@@ -13,3 +13,94 @@ jobs:
     steps:
       - name: Verify workflow registration
         run: echo "Workflow registered successfully"
+
+
+
+      - name: Collect REST API evidence
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gunicorn --bind 127.0.0.1:8080 service:app \
+            > /tmp/accounts-server.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health; then
+              break
+            fi
+            sleep 1
+          done
+
+          BASE="http://127.0.0.1:8080"
+
+          record_request() {
+            FILE="$1"
+            METHOD="$2"
+            URL="$3"
+            EXPECTED="$4"
+            BODY="${5:-}"
+
+            ARGS=(-sS -X "$METHOD" -D /tmp/headers
+                  -o /tmp/body -w "%{http_code}")
+
+            printf 'curl -i -X %s %s' "$METHOD" "$URL" > "$FILE"
+
+            if [ -n "$BODY" ]; then
+              printf " -H 'Content-Type: application/json' -d '%s'" \
+                "$BODY" >> "$FILE"
+              ARGS+=(-H "Content-Type: application/json" -d "$BODY")
+            fi
+
+            printf '\n' >> "$FILE"
+
+            CODE=$(curl "${ARGS[@]}" "$URL")
+
+            cat /tmp/headers >> "$FILE"
+            cat /tmp/body >> "$FILE"
+            printf '\n' >> "$FILE"
+
+            cat "$FILE"
+
+            echo "HTTP status: $CODE"
+
+            if [ "$CODE" != "$EXPECTED" ]; then
+              echo "Expected HTTP $EXPECTED but received $CODE"
+              exit 1
+            fi
+          }
+
+          CREATE='{"name":"Demo Account","email":"demo@example.com","address":"123 Sample Street","phone_number":"5550100","date_joined":"2026-10-22"}'
+
+          record_request rest-create-done POST \
+            "$BASE/accounts" 201 "$CREATE"
+
+          ID=$(python -c \
+            'import json; print(json.load(open("/tmp/body"))["id"])')
+
+          record_request rest-list-done GET \
+            "$BASE/accounts" 200
+
+          record_request rest-read-done GET \
+            "$BASE/accounts/$ID" 200
+
+          UPDATE='{"name":"Updated Account","email":"updated@example.com","address":"456 New Street","phone_number":"5550200","date_joined":"2026-10-22"}'
+
+          record_request rest-update-done PUT \
+            "$BASE/accounts/$ID" 200 "$UPDATE"
+
+          record_request rest-delete-done DELETE \
+            "$BASE/accounts/$ID" 204
+
+      - name: Upload REST API evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rest-api-evidence
+          path: |
+            rest-create-done
+            rest-list-done
+            rest-read-done
+            rest-update-done
+            rest-delete-done
+          if-no-files-found: warn
