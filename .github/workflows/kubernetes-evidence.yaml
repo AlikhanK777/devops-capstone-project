@@ -1,0 +1,180 @@
+
+name: Accounts Kubernetes Deployment Evidence
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/kubernetes-evidence.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kubernetes-deploy:
+    name: Deploy Accounts to Kubernetes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Create Kubernetes cluster
+        uses: helm/kind-action@v1.14.0
+        with:
+          cluster_name: capstone
+          wait: 120s
+
+      - name: Build and load Accounts Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Building Accounts Docker image..."
+          docker build -t accounts:capstone .
+
+          echo "Loading image into Kubernetes..."
+          kind load docker-image accounts:capstone --name capstone
+
+          echo "Docker image loaded successfully."
+
+      - name: Deploy PostgreSQL to Kubernetes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl create deployment postgres \
+            --image=postgres:14
+
+          kubectl set env deployment/postgres \
+            POSTGRES_USER=postgres \
+            POSTGRES_PASSWORD=postgres \
+            POSTGRES_DB=accounts
+
+          kubectl expose deployment postgres \
+            --name=postgres \
+            --port=5432 \
+            --target-port=5432
+
+          kubectl rollout status deployment/postgres \
+            --timeout=180s
+
+          echo "PostgreSQL deployment is ready."
+
+      - name: Deploy Accounts API to Kubernetes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl create deployment accounts \
+            --image=accounts:capstone \
+            --port=8080
+
+          kubectl set env deployment/accounts \
+            DATABASE_URI=postgresql://postgres:postgres@postgres:5432/accounts \
+            SQLALCHEMY_DATABASE_URI=postgresql://postgres:postgres@postgres:5432/accounts
+
+          kubectl expose deployment accounts \
+            --name=accounts \
+            --port=8080 \
+            --target-port=8080 \
+            --type=ClusterIP
+
+          kubectl rollout status deployment/accounts \
+            --timeout=240s
+
+          echo "Accounts API deployed successfully."
+
+      - name: Verify Kubernetes application JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl port-forward service/accounts \
+            18080:8080 > /tmp/accounts-port-forward.log 2>&1 &
+
+          PF_PID=$!
+          trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+
+          SUCCESS=0
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 5 \
+              http://127.0.0.1:18080/ \
+              -o kube-app-output; then
+              SUCCESS=1
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "ERROR: Accounts API did not respond."
+            cat /tmp/accounts-port-forward.log
+            exit 1
+          fi
+
+          python3 -m json.tool kube-app-output
+
+          echo "Application responded from Kubernetes."
+
+      - name: Save Kubernetes deployment evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "TASK 31 - KUBERNETES DEPLOYMENT EVIDENCE"
+            echo
+
+            echo "=== KUBERNETES CONTEXT ==="
+            kubectl config current-context
+            echo
+
+            echo "=== DEPLOYMENTS ==="
+            kubectl get deployments -o wide
+            echo
+
+            echo "=== PODS ==="
+            kubectl get pods -o wide
+            echo
+
+            echo "=== REPLICA SETS ==="
+            kubectl get replicasets -o wide
+            echo
+
+            echo "=== SERVICES ==="
+            kubectl get services -o wide
+            echo
+
+            echo "=== ACCOUNTS DEPLOYMENT STATUS ==="
+            kubectl rollout status deployment/accounts
+            echo
+
+            echo "=== ACCOUNTS DEPLOYMENT DETAILS ==="
+            kubectl describe deployment accounts
+          } | tee kube-deploy-accounts
+
+          echo "Kubernetes evidence saved successfully."
+
+      - name: Show diagnostics if deployment fails
+        if: failure()
+        run: |
+          kubectl get all -o wide || true
+          kubectl describe pods -l app=accounts || true
+          kubectl logs deployment/accounts --tail=100 || true
+          kubectl logs deployment/postgres --tail=100 || true
+
+      - name: Upload Kubernetes evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-evidence
+          path: |
+            kube-deploy-accounts
+            kube-app-output
+          if-no-files-found: warn
