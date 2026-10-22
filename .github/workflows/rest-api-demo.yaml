@@ -170,6 +170,16 @@ jobs:
             "curl -i -X DELETE $BASE/accounts/$ACCOUNT_ID" \
             -X DELETE "$BASE/accounts/$ACCOUNT_ID"
 
+          echo "TASK 26 - APPLICATION JSON OUTPUT"
+
+          curl --fail-with-body --silent --show-error \
+            --max-time 20 "$BASE/" | tee kube-app-output
+
+          echo
+
+          python -m json.tool kube-app-output > /dev/null
+
+          echo "Application JSON captured successfully."
           echo "All five REST API requests passed."
 
       - name: Upload REST API evidence
@@ -183,6 +193,7 @@ jobs:
             rest-read-done
             rest-update-done
             rest-delete-done
+            kube-app-output
           if-no-files-found: warn
 
       - name: Show server logs if failed
