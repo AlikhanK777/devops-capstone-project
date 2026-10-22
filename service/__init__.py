@@ -4,13 +4,14 @@ Package: service
 Package for the application models and service routes.
 
 This module creates and configures the Flask app,
-sets up logging, security headers, and the SQL database.
+sets up logging, security headers, CORS, and the SQL database.
 """
 
 import sys
 
 from flask import Flask
 from flask_talisman import Talisman
+from flask_cors import CORS
 
 from service import config
 from service.common import log_handlers
@@ -21,8 +22,8 @@ app = Flask(__name__)
 app.config.from_object(config)
 
 
-# Configure security headers using Flask-Talisman
-# HTTPS is disabled for local development and testing.
+# Configure security headers using Flask-Talisman.
+# HTTPS redirection is disabled for local development and testing.
 talisman = Talisman(
     app,
     force_https=False,
@@ -30,7 +31,18 @@ talisman = Talisman(
 )
 
 
-# Import the routes after the Flask app is created
+# Enable Cross-Origin Resource Sharing for the Accounts REST API.
+# Allow all origins for the educational project.
+CORS(
+    app,
+    resources={
+        r"/accounts": {"origins": "*"},
+        r"/accounts/*": {"origins": "*"},
+    },
+)
+
+
+# Import routes and models after the Flask app is created.
 # pylint: disable=wrong-import-position, cyclic-import, wrong-import-order
 from service import routes, models  # noqa: F401 E402
 
@@ -53,7 +65,7 @@ try:
     models.init_db(app)
 except Exception as error:  # pylint: disable=broad-except
     app.logger.critical("%s: Cannot continue", error)
-    # Gunicorn requires exit code 4 to stop spawning workers.
+    # Gunicorn requires exit code 4 to stop spawning workers when they die.
     sys.exit(4)
 
 
